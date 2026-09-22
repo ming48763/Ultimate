@@ -1,0 +1,13 @@
+---
+description: Home galaxy satellites must join the big-bang choreography automatically
+globs: src/lib/nav.ts,src/pages/Home.tsx,src/index.css
+alwaysApply: true
+---
+
+# Galaxy satellite bang
+
+New home satellites belong in `SATELLITE_SEEDS` inside `src/lib/nav.ts`. Orbit `start` / `rest` are computed from the list length so every satellite gets the same 1.6s delay, 1.5s arrive/grow, and one orbit lap. Do not wrap those angles into 0–360; wrapping makes a satellite skip the lap (學而 did this).
+
+Do not add per-id bang or float CSS such as `.sat-notes`. Home already maps `SATELLITES` and `.sat` / `.orb-sat` run the explosion.
+
+Also add the module to `View`, `MODULES`, and `App` routing. Keep general chat models out of 智能.

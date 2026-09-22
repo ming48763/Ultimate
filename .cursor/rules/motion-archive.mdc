@@ -1,0 +1,16 @@
+---
+description: When 媽媽 says 此動畫效果已完善, archive that motion into data/motions.json
+alwaysApply: true
+---
+
+# Archive perfected motion
+
+If 媽媽 says 「此動畫效果已完善」 (or close wording):
+
+1. Name the animation just finished in this chat in 中文 (e.g. 星鏈局部展開).
+2. Set `kind`: `single` 單一 / `local` 局部（多段組合） / `transit` 轉場（換頁）.
+3. Pull the real keyframes and selectors from the files you just wrote. Add a small isolated `html` + `css` preview that can replay inside the 軌跡 lab iframe. Do not dump all of `index.css`.
+4. Upsert `data/motions.json` by `id`. Keep `source` as the production files/selectors.
+5. Do not write lab edits back into production CSS. The 軌跡 experiment iframe is isolated on purpose.
+
+Shape: `{ id, name, kind, blurb, source, html, css }`.
