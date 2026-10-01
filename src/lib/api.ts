@@ -1,4 +1,4 @@
-import type { DevLog, LayoutRecord, Note, Overview, Portal, PromptItem, Resource, Settings, TraceTask } from './types'
+import type { DevLog, GradeCore, LayoutRecord, Note, Overview, Portal, ProjectPhase, PromptItem, Resource, Settings, StudyNote, TraceTask } from './types'
 import type { MotionMacro } from './motion'
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -19,6 +19,8 @@ export const api = {
   settings: () => request<Settings>('/api/settings'),
   saveSettings: (body: Partial<Settings>) => request('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
   saveProject: (id: string, body: unknown) => request(`/api/projects/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  composeAgentPrompt: (id: string, body: { kind: 'architecture' | 'feasibility'; grades: GradeCore[]; phases: ProjectPhase[] }) =>
+    request<{ prompt: string; saved?: boolean }>(`/api/projects/${id}/agent-prompt`, { method: 'POST', body: JSON.stringify(body) }),
   digestProject: (id: string, mode: 'since' | 'full' = 'since') =>
     request<{ logs: DevLog[]; digestAt: string; empty: boolean; raw?: string; needFull?: boolean }>(
       `/api/projects/${id}/digest`,
@@ -42,12 +44,21 @@ export const api = {
   saveNote: (id: string, body: unknown) => request<Note>(`/api/notes/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   removeNote: (id: string) => request(`/api/notes/${id}`, { method: 'DELETE' }),
   analyzeNote: (id: string) => request<Note>(`/api/notes/${id}/analyze`, { method: 'POST' }),
+  studyNotes: () => request<StudyNote[]>('/api/study-notes'),
+  addStudyNote: (title: string, body = '', resourceIds: string[] = [], tags: string[] = [], layout: 'single' | 'spread' = 'single') =>
+    request<StudyNote>('/api/study-notes', { method: 'POST', body: JSON.stringify({ title, body, resourceIds, tags, layout }) }),
+  saveStudyNote: (id: string, body: unknown) =>
+    request<StudyNote>(`/api/study-notes/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  removeStudyNote: (id: string) => request(`/api/study-notes/${id}`, { method: 'DELETE' }),
   resources: () => request<Resource[]>('/api/resources'),
   ingest: (url: string, tags: string[]) =>
     request<Resource>('/api/resources/ingest', { method: 'POST', body: JSON.stringify({ url, tags }) }),
   patchResource: (id: string, body: unknown) =>
     request<Resource>(`/api/resources/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  removeResource: (id: string) => request(`/api/resources/${id}`, { method: 'DELETE' }),
+  refreshResourceImage: (id: string) => request<Resource>(`/api/resources/${id}/image`, { method: 'POST' }),
   analyzeResource: (id: string) => request<Resource>(`/api/resources/${id}/analyze`, { method: 'POST' }),
+  fetchResourceCaptions: (id: string) => request<Resource>(`/api/resources/${id}/captions`, { method: 'POST' }),
   similar: (query: string, tags: string[]) =>
     request<{ title: string; href: string; snippet: string }[]>('/api/resources/similar', {
       method: 'POST',

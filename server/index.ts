@@ -8,14 +8,17 @@ import { INTEL_SEED } from '../src/lib/intel.ts'
 import {
   analyzeNote,
   analyzeResource,
+  composeAgentPrompt,
   DIGEST_TAG_RE,
   digestBulletKey,
   digestProjectLog,
+  fetchArticleView,
   fetchPage,
   groupDigestBullets,
   parseDigestDays,
   webSearch,
 } from './ai.ts'
+import { fetchYoutubeCaptions } from './youtube-subs.ts'
 import { collectDigestSource, scanWorkspace, readGit } from './scan.ts'
 import { dataDir, nowIso, readJson, uid, uploadDir, writeJson } from './store.ts'
 import { PHASE_NAMES, gradeProgress, type GradeCore, type PhaseStatus, type ProjectPhase } from '../src/lib/types.ts'
@@ -31,6 +34,14 @@ function stripQuotes(value: string) {
     return text.slice(1, -1)
   }
   return text
+}
+
+function openTarget(target: string) {
+  const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open'
+  const args = process.platform === 'win32' ? ['/c', 'start', '', target] : [target]
+  const child = spawn(command, args, { detached: true, stdio: 'ignore' })
+  child.on('error', () => undefined)
+  child.unref()
 }
 
 async function readDotEnv() {
@@ -135,14 +146,18 @@ function parseGrades(raw: unknown): GradeCore[] {
     const row = item as { id?: string; name?: string; parts?: unknown }
     return {
       id: String(row.id || uid()),
-      name: String(row.name || '').slice(0, 80),
+      name: String(row.name || '').slice(0, 4000),
       parts: Array.isArray(row.parts)
         ? row.parts.slice(0, 80).map((part) => {
-            const node = part as { id?: string; name?: string; done?: unknown; features?: unknown }
+            const node = part as { id?: string; name?: string; done?: unknown; features?: unknown; phase?: unknown }
+            const phaseRaw = Number(node.phase)
+            const phase =
+              Number.isInteger(phaseRaw) && phaseRaw >= 0 && phaseRaw < PHASE_NAMES.length ? phaseRaw : 0
             return {
               id: String(node.id || uid()),
               name: String(node.name || '').slice(0, 80),
               done: Boolean(node.done),
+              phase,
               features: features(node.features),
             }
           })
@@ -151,13 +166,72 @@ function parseGrades(raw: unknown): GradeCore[] {
   })
 }
 
+function sanitizePhaseNote(raw: unknown) {
+  return String(raw ?? '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .slice(0, 20000)
+}
+
+function parsePhaseFiles(raw: unknown): { id: string; name: string; url: string }[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .slice(0, 40)
+    .map((item) => {
+      const row = item as { id?: string; name?: string; url?: string }
+      const url = String(row.url || '')
+      if (!url.startsWith('/uploads/')) return null
+      return {
+        id: String(row.id || uid()),
+        name: String(row.name || '檔案').slice(0, 180),
+        url,
+      }
+    })
+    .filter((item): item is { id: string; name: string; url: string } => Boolean(item))
+}
+
 function parsePhases(raw: unknown, fallback: ProjectPhase[] = defaultPhases()): ProjectPhase[] {
   const allowed: PhaseStatus[] = ['idle', 'doing', 'done']
   return PHASE_NAMES.map((_, index) => {
-    const row = Array.isArray(raw) ? (raw[index] as { status?: string; note?: string } | undefined) : undefined
+    const row = Array.isArray(raw)
+      ? (raw[index] as { status?: string; note?: string; files?: unknown; name?: string } | undefined)
+      : undefined
     const status = allowed.includes(row?.status as PhaseStatus) ? (row?.status as PhaseStatus) : fallback[index]?.status ?? 'idle'
-    return { status, note: String(row?.note ?? fallback[index]?.note ?? '').slice(0, 400) }
+    const name = String(row?.name ?? fallback[index]?.name ?? '').trim().slice(0, 40)
+    return {
+      status,
+      note: sanitizePhaseNote(row?.note ?? fallback[index]?.note ?? ''),
+      files: parsePhaseFiles(Array.isArray(row?.files) ? row.files : fallback[index]?.files),
+      ...(name ? { name } : {}),
+    }
   })
+}
+
+function gradesFilled(grades?: GradeCore[]) {
+  return (grades ?? []).some(
+    (core) => core.name.trim() || core.parts.some((part) => part.name.trim() || part.features.length),
+  )
+}
+
+let projectMetasCache: ProjectMeta[] | null = null
+
+async function loadProjectMetas() {
+  const list = await readJson<ProjectMeta[]>('projects.json', projectMetasCache ?? [])
+  if (Array.isArray(list) && list.length) {
+    projectMetasCache = list
+    return list
+  }
+  if (projectMetasCache?.length) return projectMetasCache
+  return Array.isArray(list) ? list : []
+}
+
+async function saveProjectMeta(next: ProjectMeta) {
+  const list = [...(await loadProjectMetas())]
+  const index = list.findIndex((item) => item.id === next.id)
+  if (index >= 0) list[index] = next
+  else list.push(next)
+  projectMetasCache = list
+  await writeJson('projects.json', list)
 }
 
 type DevLog = {
@@ -180,6 +254,18 @@ type Note = {
   updatedAt: string
 }
 
+type StudyNote = {
+  id: string
+  title: string
+  body: string
+  source: string
+  layout: 'single' | 'spread'
+  tags: string[]
+  resourceIds: string[]
+  createdAt: string
+  updatedAt: string
+}
+
 type Resource = {
   id: string
   title: string
@@ -191,6 +277,10 @@ type Resource = {
   tags: string[]
   status: 'inbox' | 'saved' | 'dismissed'
   analysis: string
+  note: string
+  captions: string
+  captionLang: string
+  articleHtml: string
   createdAt: string
 }
 
@@ -276,7 +366,7 @@ async function loadAll() {
     readJson<Todo[]>('todos.json', []),
     readJson<Journal[]>('journals.json', []),
     readJson<Milestone[]>('milestones.json', []),
-    readJson<ProjectMeta[]>('projects.json', []),
+    loadProjectMetas(),
     readJson<Note[]>('notes.json', []),
     readJson<Resource[]>('resources.json', []),
     readJson<PromptItem[]>('prompts.json', []),
@@ -405,8 +495,13 @@ app.put('/api/settings', async (req, res) => {
 })
 
 app.put('/api/projects/:id', async (req, res) => {
-  const metas = await readJson<ProjectMeta[]>('projects.json', [])
+  const metas = await loadProjectMetas()
   const current = metas.find((item) => item.id === req.params.id)
+  const incomingGrades = Array.isArray(req.body.grades) ? parseGrades(req.body.grades) : null
+  const grades =
+    incomingGrades && (gradesFilled(incomingGrades) || !gradesFilled(current?.grades))
+      ? incomingGrades
+      : (current?.grades ?? [])
   const next: ProjectMeta = {
     id: req.params.id,
     summary: req.body.summary ?? current?.summary ?? '',
@@ -421,12 +516,71 @@ app.put('/api/projects/:id', async (req, res) => {
       other: req.body.deploy?.other ?? current?.deploy.other ?? '',
       status: req.body.deploy?.status ?? current?.deploy.status ?? 'local',
     },
-    grades: Array.isArray(req.body.grades) ? parseGrades(req.body.grades) : (current?.grades ?? []),
+    grades,
     phases: Array.isArray(req.body.phases) ? parsePhases(req.body.phases, current?.phases) : parsePhases(current?.phases),
   }
-  const list = [...metas.filter((item) => item.id !== req.params.id), next]
-  await writeJson('projects.json', list)
+  await saveProjectMeta(next)
   res.json(next)
+})
+
+app.post('/api/projects/:id/agent-prompt', async (req, res) => {
+  const metas = await loadProjectMetas()
+  const current = metas.find((item) => item.id === req.params.id)
+  const scanned = await scanWorkspace()
+  const project = scanned.find((item) => item.id === req.params.id)
+  if (!current && !project) {
+    res.status(404).json({ error: '找不到專案' })
+    return
+  }
+  const grades = Array.isArray(req.body.grades) ? parseGrades(req.body.grades) : (current?.grades ?? [])
+  const phases = Array.isArray(req.body.phases)
+    ? parsePhases(req.body.phases, current?.phases)
+    : parsePhases(current?.phases)
+  const core = grades[0]
+  const settings = await loadSettings()
+  try {
+    const prompt = await composeAgentPrompt(settings, {
+      kind: req.body.kind === 'feasibility' ? 'feasibility' : 'architecture',
+      name: project?.name || req.params.id,
+      core: core?.name ?? '',
+      phases: phases.map((item, index) => ({
+        name: item.name?.trim() || PHASE_NAMES[index],
+        status: item.status,
+        note: item.note,
+        files: (item.files ?? []).map((file) => file.name),
+      })),
+      parts: (core?.parts ?? []).map((part) => ({
+        name: part.name,
+        phase: part.phase ?? 0,
+        features: part.features.map((item) => item.name),
+      })),
+    })
+    const kind = req.body.kind === 'feasibility' ? 'feasibility' : 'architecture'
+    const label = kind === 'feasibility' ? '可行性評估' : '專案架構生成'
+    let saved = false
+    try {
+      const prompts = await readJson<PromptItem[]>('prompts.json', [])
+      prompts.unshift({
+        id: uid(),
+        title: `${project?.name || req.params.id} · ${label}`,
+        body: prompt,
+        category: label,
+        note: '由核心頁生成',
+        rating: 0,
+        correction: '',
+        favorite: false,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      })
+      await writeJson('prompts.json', prompts)
+      saved = true
+    } catch {
+      saved = false
+    }
+    res.json({ prompt, saved })
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '生成失敗' })
+  }
 })
 
 app.post('/api/projects/:id/digest', async (req, res) => {
@@ -437,7 +591,7 @@ app.post('/api/projects/:id/digest', async (req, res) => {
     return
   }
   const settings = await loadSettings()
-  const metas = await readJson<ProjectMeta[]>('projects.json', [])
+  const metas = await loadProjectMetas()
   const current = metas.find((item) => item.id === project.id)
   const full = req.body?.mode === 'full'
   const sinceStamp = current?.digestAt || ''
@@ -532,7 +686,7 @@ app.post('/api/projects/:id/digest', async (req, res) => {
       grades: current?.grades ?? [],
       phases: parsePhases(current?.phases),
     }
-    await writeJson('projects.json', [...metas.filter((item) => item.id !== project.id), next])
+    await saveProjectMeta(next)
     res.json({
       logs: logs.filter((item) => item.project === project.id),
       digestAt: stamp,
@@ -726,6 +880,64 @@ app.delete('/api/notes/:id', async (req, res) => {
   res.json({ ok: true })
 })
 
+app.get('/api/study-notes', async (_req, res) => {
+  const list = await readJson<StudyNote[]>('study-notes.json', [])
+  res.json(list.map((item) => ({
+    ...item,
+    tags: item.tags || [],
+    resourceIds: item.resourceIds || [],
+    source: item.source || '',
+    layout: item.layout === 'spread' ? 'spread' : 'single',
+  })))
+})
+
+app.post('/api/study-notes', async (req, res) => {
+  const notes = await readJson<StudyNote[]>('study-notes.json', [])
+  const item: StudyNote = {
+    id: uid(),
+    title: String(req.body.title || '未命名筆記').trim().slice(0, 120) || '未命名筆記',
+    body: String(req.body.body || '').slice(0, 80000),
+    source: String(req.body.source || '').slice(0, 80000),
+    layout: req.body.layout === 'spread' ? 'spread' : 'single',
+    tags: Array.isArray(req.body.tags) ? req.body.tags.map(String).map((tag) => tag.trim()).filter(Boolean).slice(0, 40) : [],
+    resourceIds: Array.isArray(req.body.resourceIds) ? req.body.resourceIds.map(String).slice(0, 40) : [],
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+  }
+  notes.unshift(item)
+  await writeJson('study-notes.json', notes)
+  res.json(item)
+})
+
+app.put('/api/study-notes/:id', async (req, res) => {
+  const notes = await readJson<StudyNote[]>('study-notes.json', [])
+  const item = notes.find((note) => note.id === req.params.id)
+  if (!item) {
+    res.status(404).json({ error: '找不到筆記' })
+    return
+  }
+  if (typeof req.body.title === 'string') item.title = req.body.title.trim().slice(0, 120) || item.title
+  if (typeof req.body.body === 'string') item.body = req.body.body.slice(0, 80000)
+  if (typeof req.body.source === 'string') item.source = req.body.source.slice(0, 80000)
+  if (req.body.layout === 'single' || req.body.layout === 'spread') item.layout = req.body.layout
+  if (Array.isArray(req.body.tags)) {
+    item.tags = req.body.tags.map(String).map((tag) => tag.trim()).filter(Boolean).slice(0, 40)
+  }
+  if (Array.isArray(req.body.resourceIds)) item.resourceIds = req.body.resourceIds.map(String).slice(0, 40)
+  item.updatedAt = nowIso()
+  await writeJson('study-notes.json', notes)
+  res.json(item)
+})
+
+app.delete('/api/study-notes/:id', async (req, res) => {
+  const notes = await readJson<StudyNote[]>('study-notes.json', [])
+  await writeJson(
+    'study-notes.json',
+    notes.filter((note) => note.id !== req.params.id),
+  )
+  res.json({ ok: true })
+})
+
 app.post('/api/notes/:id/analyze', async (req, res) => {
   const notes = await readJson<Note[]>('notes.json', [])
   const item = notes.find((note) => note.id === req.params.id)
@@ -751,11 +963,20 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     res.status(400).json({ error: '沒有檔案' })
     return
   }
-  res.json({ url: `/uploads/${req.file.filename}`, name: req.file.originalname })
+  const name = Buffer.from(req.file.originalname, 'latin1').toString('utf8')
+  res.json({ url: `/uploads/${req.file.filename}`, name })
 })
 
 app.get('/api/resources', async (_req, res) => {
-  res.json(await readJson<Resource[]>('resources.json', []))
+  const list = await readJson<Resource[]>('resources.json', [])
+  res.json(list.map((item) => ({
+    ...item,
+    note: item.note || '',
+    analysis: item.analysis || '',
+    captions: item.captions || '',
+    captionLang: item.captionLang || '',
+    articleHtml: item.articleHtml || '',
+  })))
 })
 
 app.post('/api/resources/ingest', async (req, res) => {
@@ -778,6 +999,9 @@ app.post('/api/resources/ingest', async (req, res) => {
       tags: Array.isArray(req.body.tags) ? req.body.tags : [],
       status: 'inbox',
       analysis: '',
+      note: '',
+      captions: '',
+      captionLang: '',
       createdAt: nowIso(),
     }
     resources.unshift(item)
@@ -800,8 +1024,33 @@ app.patch('/api/resources/:id', async (req, res) => {
     item.status = req.body.status
   }
   if (typeof req.body.title === 'string') item.title = req.body.title
+  if (typeof req.body.note === 'string') item.note = req.body.note.slice(0, 80000)
+  if (typeof req.body.analysis === 'string') item.analysis = req.body.analysis.slice(0, 80000)
+  if (typeof req.body.captions === 'string') item.captions = req.body.captions.slice(0, 120000)
+  if (typeof req.body.captionLang === 'string') item.captionLang = req.body.captionLang.slice(0, 40)
   await writeJson('resources.json', resources)
   res.json(item)
+})
+
+app.post('/api/resources/:id/image', async (req, res) => {
+  const resources = await readJson<Resource[]>('resources.json', [])
+  const item = resources.find((resource) => resource.id === req.params.id)
+  if (!item) {
+    res.status(404).json({ error: '找不到資源' })
+    return
+  }
+  if (item.kind === 'youtube' || item.image) {
+    res.json(item)
+    return
+  }
+  try {
+    const page = await fetchPage(item.url)
+    item.image = page.image
+    await writeJson('resources.json', resources)
+    res.json(item)
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '預覽擷取失敗' })
+  }
 })
 
 app.delete('/api/resources/:id', async (req, res) => {
@@ -822,11 +1071,40 @@ app.post('/api/resources/:id/analyze', async (req, res) => {
   }
   const settings = await loadSettings()
   try {
-    item.analysis = await analyzeResource(settings, item)
+    const result = await analyzeResource(settings, item)
+    item.analysis = result.analysis
+    item.captions = result.captions
+    item.captionLang = result.captionLang
     await writeJson('resources.json', resources)
     res.json(item)
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : '分析失敗' })
+  }
+})
+
+app.post('/api/resources/:id/captions', async (req, res) => {
+  const resources = await readJson<Resource[]>('resources.json', [])
+  const item = resources.find((resource) => resource.id === req.params.id)
+  if (!item) {
+    res.status(404).json({ error: '找不到資源' })
+    return
+  }
+  const video = item.kind === 'youtube'
+  try {
+    if (video) {
+      const captions = await fetchYoutubeCaptions(item.url)
+      item.captions = captions.text
+      item.captionLang = captions.lang
+    } else {
+      const view = await fetchArticleView(item.url)
+      item.captions = view.text
+      item.captionLang = ''
+      item.articleHtml = view.doc
+    }
+    await writeJson('resources.json', resources)
+    res.json(item)
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : video ? '字幕擷取失敗' : '內文擷取失敗' })
   }
 })
 
@@ -957,7 +1235,7 @@ app.post('/api/portals/:id/open', async (req, res) => {
     res.status(404).json({ error: '找不到入口' })
     return
   }
-  spawn('cmd', ['/c', 'start', '', item.target], { detached: true, stdio: 'ignore' }).unref()
+  openTarget(item.target)
   res.json({ ok: true })
 })
 
@@ -1026,7 +1304,7 @@ app.post('/api/intel/:id/open', async (req, res) => {
     res.status(404).json({ error: '找不到工具' })
     return
   }
-  spawn('cmd', ['/c', 'start', '', item.target], { detached: true, stdio: 'ignore' }).unref()
+  openTarget(item.target)
   res.json({ ok: true })
 })
 

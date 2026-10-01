@@ -49,7 +49,7 @@ export function Shell({
   children: ReactNode
 }) {
   const current = MODULES.find((item) => item.id === view)
-  const cosmos = view === 'console' || view === 'portal' || view === 'intel' || view === 'traces'
+  const cosmos = view === 'console' || view === 'learn' || view === 'portal' || view === 'intel' || view === 'traces'
   const [railOpen, setRailOpen] = useState(false)
   const [sparking, setSparking] = useState(false)
   const [retracting, setRetracting] = useState(false)

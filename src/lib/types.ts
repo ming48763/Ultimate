@@ -75,10 +75,22 @@ export const PHASE_NAMES = [
 ] as const
 
 export type PhaseStatus = 'idle' | 'doing' | 'done'
-export type ProjectPhase = { status: PhaseStatus; note: string }
+export type PhaseFile = { id: string; name: string; url: string }
+export type ProjectPhase = { status: PhaseStatus; note: string; name?: string; files?: PhaseFile[] }
+
+export function phaseTitle(phases: ProjectPhase[] | undefined, index: number) {
+  const custom = phases?.[index]?.name?.trim()
+  return custom || PHASE_NAMES[index] || ''
+}
 export type GradeFeature = { id: string; name: string; done?: boolean }
-export type GradePart = { id: string; name: string; done?: boolean; features: GradeFeature[] }
+export type GradePart = { id: string; name: string; done?: boolean; phase?: number; features: GradeFeature[] }
 export type GradeCore = { id: string; name: string; parts: GradePart[] }
+
+export function phaseOf(part: { phase?: number }): number {
+  const value = Number(part.phase)
+  if (!Number.isInteger(value) || value < 0 || value >= PHASE_NAMES.length) return 0
+  return value
+}
 
 export function partLit(part: { features: GradeFeature[] }): boolean {
   return part.features.length > 0 && part.features.every((item) => Boolean(item.done))
@@ -131,6 +143,18 @@ export type Note = {
   updatedAt: string
 }
 
+export type StudyNote = {
+  id: string
+  title: string
+  body: string
+  source: string
+  layout: 'single' | 'spread'
+  tags: string[]
+  resourceIds: string[]
+  createdAt: string
+  updatedAt: string
+}
+
 export type Resource = {
   id: string
   title: string
@@ -142,6 +166,10 @@ export type Resource = {
   tags: string[]
   status: 'inbox' | 'saved' | 'dismissed'
   analysis: string
+  note: string
+  captions: string
+  captionLang: string
+  articleHtml: string
   createdAt: string
 }
 
