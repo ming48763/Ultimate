@@ -9,7 +9,7 @@ function safeHref(href: string) {
 function inline(text: string, keyPrefix = 'i'): ReactNode[] {
   const nodes: ReactNode[] = []
   const re =
-    /!\[([^\]]*)\]\(([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`/g
+    /!\[([^\]]*)\]\(([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)|<u>([\s\S]+?)<\/u>|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`/g
   let last = 0
   let match: RegExpExecArray | null
   let key = 0
@@ -29,21 +29,13 @@ function inline(text: string, keyPrefix = 'i'): ReactNode[] {
           match[3]
         ),
       )
-    } else if (match[5]) nodes.push(<strong key={`${keyPrefix}-${key++}`}>{match[5]}</strong>)
-    else if (match[6]) nodes.push(<em key={`${keyPrefix}-${key++}`}>{match[6]}</em>)
-    else if (match[7]) nodes.push(<code key={`${keyPrefix}-${key++}`}>{match[7]}</code>)
+    } else if (match[5]) nodes.push(<u key={`${keyPrefix}-${key++}`}>{inline(match[5], `${keyPrefix}-u${key}`)}</u>)
+    else if (match[6]) nodes.push(<strong key={`${keyPrefix}-${key++}`}>{match[6]}</strong>)
+    else if (match[7]) nodes.push(<em key={`${keyPrefix}-${key++}`}>{match[7]}</em>)
+    else if (match[8]) nodes.push(<code key={`${keyPrefix}-${key++}`}>{match[8]}</code>)
     last = match.index + match[0].length
   }
   if (last < text.length) nodes.push(text.slice(last))
-  return nodes
-}
-
-function linesInline(lines: string[], prefix: string) {
-  const nodes: ReactNode[] = []
-  lines.forEach((line, index) => {
-    if (index) nodes.push(<br key={`${prefix}-br-${index}`} />)
-    nodes.push(...inline(line, `${prefix}-${index}`))
-  })
   return nodes
 }
 
@@ -64,11 +56,18 @@ function splitCells(line: string) {
   return value.split('|').map((cell) => cell.trim())
 }
 
+type ListPart = { text: string; at: number; end: number }
+
 type ListNode = {
   indent: number
   ordered: boolean
-  text: string
+  parts: ListPart[]
+  breakBefore: number
   children: ListNode[]
+}
+
+function mdRange(at: number, end: number) {
+  return { 'data-md-at': at, 'data-md-end': end }
 }
 
 function matchList(line: string) {
@@ -81,20 +80,32 @@ function matchList(line: string) {
   }
 }
 
-function collectList(lines: string[], start: number) {
-  const items: { indent: number; ordered: boolean; text: string }[] = []
+function collectList(lines: string[], at: number[], start: number) {
+  const items: Omit<ListNode, 'children'>[] = []
   let i = start
+  let breakBefore = 0
   while (i < lines.length) {
     const row = matchList(lines[i])
     if (row) {
-      items.push(row)
+      items.push({
+        indent: row.indent,
+        ordered: row.ordered,
+        parts: [{ text: row.text, at: at[i], end: at[i] + lines[i].length }],
+        breakBefore,
+      })
+      breakBefore = 0
       i += 1
       continue
     }
     if (!lines[i].trim()) {
       let look = i + 1
-      while (look < lines.length && !lines[look].trim()) look += 1
+      let blanks = 1
+      while (look < lines.length && !lines[look].trim()) {
+        blanks += 1
+        look += 1
+      }
       if (look < lines.length && matchList(lines[look])) {
+        breakBefore += blanks
         i = look
         continue
       }
@@ -103,7 +114,7 @@ function collectList(lines: string[], start: number) {
     const indent = lines[i].replace(/\t/g, '  ').replace(/\u3000/g, '  ').match(/^ */)?.[0].length ?? 0
     const last = items[items.length - 1]
     if (last && indent > last.indent) {
-      last.text += `\n${lines[i].trim()}`
+      last.parts.push({ text: lines[i].trim(), at: at[i], end: at[i] + lines[i].length })
       i += 1
       continue
     }
@@ -112,7 +123,7 @@ function collectList(lines: string[], start: number) {
   return { items, next: i }
 }
 
-function nestList(items: { indent: number; ordered: boolean; text: string }[]): ListNode[] {
+function nestList(items: Omit<ListNode, 'children'>[]): ListNode[] {
   const root: ListNode[] = []
   const stack: ListNode[] = []
   for (const item of items) {
@@ -138,8 +149,13 @@ function renderList(nodes: ListNode[], prefix: string): ReactNode {
     return (
       <Tag key={`${prefix}-g${gi}`}>
         {group.map((node, index) => (
-          <li key={index}>
-            {linesInline(node.text.split('\n'), `${prefix}-${gi}-${index}`)}
+          <li key={index} style={node.breakBefore ? { marginTop: `${node.breakBefore * 1.6}em` } : undefined}>
+            {node.parts.map((part, pi) => (
+              <Fragment key={pi}>
+                {pi ? <br /> : null}
+                <span {...mdRange(part.at, part.end)}>{inline(part.text, `${prefix}-${gi}-${index}-${pi}`)}</span>
+              </Fragment>
+            ))}
             {node.children.length ? renderList(node.children, `${prefix}-${gi}-${index}-c`) : null}
           </li>
         ))}
@@ -148,8 +164,129 @@ function renderList(nodes: ListNode[], prefix: string): ReactNode {
   })
 }
 
+const CODE_KEYWORDS = new Set(
+  `const let var function return if else for while class import export from async await new try catch throw
+def elif lambda pass None True False
+public private static void int bool enum interface type extends implements
+break continue switch case default yield
+null undefined true false
+package func struct
+SELECT FROM WHERE INSERT UPDATE DELETE JOIN`.split(/\s+/),
+)
+
+function highlightCode(source: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  let plain = ''
+  let key = 0
+  const flush = () => {
+    if (!plain) return
+    nodes.push(plain)
+    plain = ''
+  }
+  const emit = (text: string, kind: string) => {
+    flush()
+    nodes.push(
+      <span key={key++} className={`md-c-${kind}`}>
+        {text}
+      </span>,
+    )
+  }
+  let i = 0
+  while (i < source.length) {
+    const rest = source.slice(i)
+    if (rest.startsWith('/*')) {
+      const end = rest.indexOf('*/')
+      const size = end < 0 ? rest.length : end + 2
+      emit(rest.slice(0, size), 'comment')
+      i += size
+      continue
+    }
+    if (rest.startsWith('//')) {
+      const end = rest.indexOf('\n')
+      const size = end < 0 ? rest.length : end
+      emit(rest.slice(0, size), 'comment')
+      i += size
+      continue
+    }
+    if (rest[0] === '#') {
+      const atLine = i === 0 || source[i - 1] === '\n' || /\s/.test(source[i - 1])
+      const hex = /^#[0-9a-fA-F]{3,8}(?![0-9a-fA-F])/.test(rest)
+      if (atLine && !hex) {
+        const end = rest.indexOf('\n')
+        const size = end < 0 ? rest.length : end
+        emit(rest.slice(0, size), 'comment')
+        i += size
+        continue
+      }
+    }
+    if (rest[0] === '"' || rest[0] === "'" || rest[0] === '`') {
+      const quote = rest[0]
+      let j = 1
+      while (j < rest.length) {
+        if (rest[j] === '\\') {
+          j += 2
+          continue
+        }
+        if (rest[j] === '\n' && quote !== '`') break
+        if (rest[j] === quote) {
+          j += 1
+          break
+        }
+        j += 1
+      }
+      if (rest[j - 1] === quote) {
+        emit(rest.slice(0, j), 'string')
+        i += j
+        continue
+      }
+    }
+    const word = rest.match(/^[A-Za-z_]\w*/)
+    if (word) {
+      if (CODE_KEYWORDS.has(word[0])) emit(word[0], 'keyword')
+      else plain += word[0]
+      i += word[0].length
+      continue
+    }
+    const num = rest.match(/^\d[\d_]*(?:\.\d+)?/)
+    if (num) {
+      emit(num[0], 'number')
+      i += num[0].length
+      continue
+    }
+    plain += rest[0]
+    i += 1
+  }
+  flush()
+  return nodes
+}
+
+function lineSpans(source: string) {
+  const raw = source.split('\n')
+  const lines: string[] = []
+  const at: number[] = []
+  let cursor = 0
+  for (const row of raw) {
+    at.push(cursor)
+    lines.push(row.endsWith('\r') ? row.slice(0, -1) : row)
+    cursor += row.length + 1
+  }
+  return { lines, at }
+}
+
+function cellRanges(line: string, lineAt: number) {
+  const cells = splitCells(line)
+  let search = 0
+  return cells.map((cell) => {
+    const found = cell ? line.indexOf(cell, search) : search
+    const start = found < 0 ? search : found
+    const end = start + cell.length
+    search = Math.max(search, end)
+    return { cell, at: lineAt + start, end: lineAt + end }
+  })
+}
+
 function parseBlocks(source: string): ReactNode[] {
-  const lines = source.replace(/\r\n/g, '\n').split('\n')
+  const { lines, at } = lineSpans(source)
   const blocks: ReactNode[] = []
   let i = 0
   let key = 0
@@ -159,22 +296,29 @@ function parseBlocks(source: string): ReactNode[] {
     const fence = line.match(/^```(\w*)$/)
     if (fence) {
       const lang = fence[1]
-      const body: string[] = []
+      const open = i
+      const body: number[] = []
       i += 1
       while (i < lines.length && !lines[i].startsWith('```')) {
-        body.push(lines[i])
+        body.push(i)
         i += 1
       }
       if (i < lines.length) i += 1
       blocks.push(
-        <pre key={key++}>
-          <code className={lang ? `lang-${lang}` : undefined}>{body.join('\n')}</code>
+        <pre key={key++} {...mdRange(at[open], at[open] + lines[open].length)}>
+          <code className={lang ? `lang-${lang}` : undefined}>
+            {body.map((lineNo) => (
+              <span key={lineNo} className="md-code-line" {...mdRange(at[lineNo], at[lineNo] + lines[lineNo].length)}>
+                {lines[lineNo] ? highlightCode(lines[lineNo]) : '\u200b'}
+              </span>
+            ))}
+          </code>
         </pre>,
       )
       continue
     }
     if (/^(\*\s*\*\s*\*|-{3,}|_{3,})\s*$/.test(line)) {
-      blocks.push(<hr key={key++} />)
+      blocks.push(<hr key={key++} {...mdRange(at[i], at[i] + line.length)} />)
       i += 1
       continue
     }
@@ -182,21 +326,22 @@ function parseBlocks(source: string): ReactNode[] {
     if (heading) {
       const text = inline(heading[2].trim(), `h${key}`)
       const level = heading[1].length
-      if (level === 1) blocks.push(<h1 key={key++}>{text}</h1>)
-      else if (level === 2) blocks.push(<h2 key={key++}>{text}</h2>)
-      else if (level === 3) blocks.push(<h3 key={key++}>{text}</h3>)
-      else blocks.push(<h4 key={key++}>{text}</h4>)
+      const range = mdRange(at[i], at[i] + line.length)
+      if (level === 1) blocks.push(<h1 key={key++} {...range}>{text}</h1>)
+      else if (level === 2) blocks.push(<h2 key={key++} {...range}>{text}</h2>)
+      else if (level === 3) blocks.push(<h3 key={key++} {...range}>{text}</h3>)
+      else blocks.push(<h4 key={key++} {...range}>{text}</h4>)
       i += 1
       continue
     }
     if (isTableLine(line) && i + 1 < lines.length && isTableSep(lines[i + 1])) {
-      const rows: string[][] = []
+      const rows: { cells: { cell: string; at: number; end: number }[] }[] = []
       while (i < lines.length && isTableLine(lines[i])) {
-        if (!isTableSep(lines[i])) rows.push(splitCells(lines[i]))
+        if (!isTableSep(lines[i])) rows.push({ cells: cellRanges(lines[i], at[i]) })
         i += 1
       }
       if (rows.length) {
-        const head = rows[0]
+        const head = rows[0].cells
         const body = rows.slice(1)
         const tableKey = key++
         blocks.push(
@@ -205,7 +350,9 @@ function parseBlocks(source: string): ReactNode[] {
               <thead>
                 <tr>
                   {head.map((cell, ci) => (
-                    <th key={ci}>{inline(cell, `th-${tableKey}-${ci}`)}</th>
+                    <th key={ci} {...mdRange(cell.at, cell.end)}>
+                      {inline(cell.cell, `th-${tableKey}-${ci}`)}
+                    </th>
                   ))}
                 </tr>
               </thead>
@@ -213,8 +360,10 @@ function parseBlocks(source: string): ReactNode[] {
                 <tbody>
                   {body.map((row, ri) => (
                     <tr key={ri}>
-                      {row.map((cell, ci) => (
-                        <td key={ci}>{inline(cell, `td-${tableKey}-${ri}-${ci}`)}</td>
+                      {row.cells.map((cell, ci) => (
+                        <td key={ci} {...mdRange(cell.at, cell.end)}>
+                          {inline(cell.cell, `td-${tableKey}-${ri}-${ci}`)}
+                        </td>
                       ))}
                     </tr>
                   ))}
@@ -227,16 +376,26 @@ function parseBlocks(source: string): ReactNode[] {
       continue
     }
     if (/^>\s?/.test(line)) {
-      const quote: string[] = []
+      const quote: { text: string; at: number; end: number }[] = []
       while (i < lines.length && /^>\s?/.test(lines[i])) {
-        quote.push(lines[i].replace(/^>\s?/, ''))
+        quote.push({ text: lines[i].replace(/^>\s?/, ''), at: at[i], end: at[i] + lines[i].length })
         i += 1
       }
-      blocks.push(<blockquote key={key++}>{linesInline(quote, `q${key}`)}</blockquote>)
+      const quoteKey = key++
+      blocks.push(
+        <blockquote key={quoteKey}>
+          {quote.map((part, pi) => (
+            <Fragment key={pi}>
+              {pi ? <br /> : null}
+              <span {...mdRange(part.at, part.end)}>{inline(part.text, `q${quoteKey}-${pi}`)}</span>
+            </Fragment>
+          ))}
+        </blockquote>,
+      )
       continue
     }
     if (matchList(line)) {
-      const collected = collectList(lines, i)
+      const collected = collectList(lines, at, i)
       i = collected.next
       const tree = nestList(collected.items)
       blocks.push(<Fragment key={key++}>{renderList(tree, `l${key}`)}</Fragment>)
@@ -246,24 +405,32 @@ function parseBlocks(source: string): ReactNode[] {
       i += 1
       continue
     }
-    const para: string[] = []
+    const para: { text: string; at: number; end: number }[] = []
     while (
       i < lines.length &&
       lines[i].trim() &&
       !/^(#{1,4}\s|```|>\s?|\s*[-*+]\s|\s*\d+\.\s|(\*\s*\*\s*\*|-{3,}|_{3,})\s*$)/.test(lines[i]) &&
       !(isTableLine(lines[i]) && i + 1 < lines.length && isTableSep(lines[i + 1]))
     ) {
-      para.push(lines[i])
+      para.push({ text: lines[i], at: at[i], end: at[i] + lines[i].length })
       i += 1
     }
     const paraKey = key++
-    blocks.push(<p key={paraKey}>{linesInline(para, `p${paraKey}`)}</p>)
+    blocks.push(
+      <p key={paraKey}>
+        {para.map((part, pi) => (
+          <Fragment key={pi}>
+            {pi ? <br /> : null}
+            <span {...mdRange(part.at, part.end)}>{inline(part.text, `p${paraKey}-${pi}`)}</span>
+          </Fragment>
+        ))}
+      </p>,
+    )
   }
   return blocks
 }
 
 export function MarkdownView({ text }: { text: string }) {
-  const source = text.trim()
-  if (!source) return <p className="md-empty">點編輯，用 Markdown 寫筆記。</p>
-  return <div className="md-view">{parseBlocks(source)}</div>
+  if (!text.trim()) return <p className="md-empty">點編輯，用 Markdown 寫筆記。</p>
+  return <div className="md-view">{parseBlocks(text)}</div>
 }

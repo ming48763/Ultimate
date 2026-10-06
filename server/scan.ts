@@ -76,12 +76,22 @@ function textFromMessage(entry: Record<string, unknown>) {
 
 function nameFromSlug(slug: string) {
   if (slug === 'empty-window' || /Temp/i.test(slug) || /AppData/i.test(slug)) return null
-  const markers = ['Desktop-Project-', 'Desktop-']
-  for (const marker of markers) {
-    const index = slug.lastIndexOf(marker)
+  const lower = slug.toLowerCase()
+  for (const marker of ['desktop-project-', 'desktop-']) {
+    const index = lower.lastIndexOf(marker)
     if (index >= 0) return slug.slice(index + marker.length)
   }
   return null
+}
+
+async function slugFolderExists(slug: string) {
+  const candidate = `${path.sep}${slug.replace(/-/g, path.sep)}`
+  try {
+    const st = await fs.stat(candidate)
+    return st.isDirectory()
+  } catch {
+    return false
+  }
 }
 
 async function git(cwd: string, args: string[]) {
@@ -312,7 +322,9 @@ export async function scanWorkspace() {
       if (!dir.isDirectory()) continue
       const name = nameFromSlug(dir.name)
       if (!name) continue
-      const item = ensure(name, name, projects.get(name)?.folder ?? null)
+      const known = projects.get(name)
+      if (!known?.folder && !(await slugFolderExists(dir.name))) continue
+      const item = ensure(name, name, known?.folder ?? null)
       if (!item.workspaces.includes(dir.name)) item.workspaces.push(dir.name)
       const chats = await listTranscripts(path.join(cursorProjects, dir.name), dir.name, name)
       const seen = new Set(item.chats.map((chat) => chat.id))

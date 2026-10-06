@@ -789,8 +789,10 @@ function DigestLine({ text }: { text: string }) {
   )
 }
 
+const START_TAB = Math.max(0, TABS.findIndex((item) => item.id === 'progress'))
+
 export function TracesPage() {
-  const [index, setIndex] = useState(0)
+  const [index, setIndex] = useState(START_TAB)
   const [dir, setDir] = useState<Dir>(1)
   const [wrap, setWrap] = useState<number | null>(null)
   const wrapTimer = useRef(0)

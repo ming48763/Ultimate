@@ -1147,10 +1147,24 @@ textarea.tall {
   display: block;
 }
 
-.learn-card-mark {
-  place-self: center;
-  font-size: 42px;
-  color: #e8c56a;
+.learn-card-script {
+  position: absolute;
+  z-index: 1;
+  left: 12%;
+  right: 8%;
+  top: 43px;
+  margin: 0;
+  color: #243044;
+  font-family: var(--display);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 29.34px;
+  letter-spacing: 0.01em;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  pointer-events: none;
 }
 
 .learn-card-bar {
@@ -1585,6 +1599,64 @@ textarea.tall {
   color: #9aa59e;
 }
 
+.learn-split-body.is-with-tools {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.learn-page .learn-split-body.is-with-tools > .md-source,
+.learn-page .learn-split-body.is-with-tools > .md-preview {
+  flex: 1 1 auto;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.learn-note-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(232, 196, 120, 0.18);
+}
+
+.learn-fold .learn-note-tools {
+  margin-top: 8px;
+}
+
+.learn-page .learn-note-tools button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(232, 196, 120, 0.28);
+  background: transparent;
+  color: #e8c56a;
+}
+
+.learn-note-tools svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.learn-page .learn-note-tools button:hover,
+.learn-page .learn-note-tools button:focus-visible {
+  border-color: #e8c56a;
+  background: rgba(232, 196, 120, 0.12);
+}
+
 .learn-cc {
   white-space: pre-wrap;
   font-size: 13px;
@@ -1743,6 +1815,12 @@ textarea.tall {
   line-height: 1.9;
 }
 
+.md-view u {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
 .md-view ul,
 .md-view ol {
   margin: 0.15em 0 0;
@@ -1813,6 +1891,29 @@ textarea.tall {
 .md-view pre code {
   background: none;
   padding: 0;
+  color: #f3eee4;
+}
+
+.md-view pre .md-code-line {
+  display: block;
+  min-height: 1.7em;
+}
+
+.md-view pre .md-c-comment {
+  color: #8b958e;
+  font-style: italic;
+}
+
+.md-view pre .md-c-string {
+  color: #e8c56a;
+}
+
+.md-view pre .md-c-keyword {
+  color: #f0a3b5;
+}
+
+.md-view pre .md-c-number {
+  color: #8fd4b8;
 }
 
 .md-view a {

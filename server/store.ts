@@ -24,7 +24,9 @@ export async function readJson<T>(name: string, fallback: T): Promise<T> {
 export async function writeJson(name: string, value: unknown) {
   await ensureDir(dataDir)
   const file = path.join(dataDir, name)
-  await fs.writeFile(file, JSON.stringify(value, null, 2), 'utf8')
+  const tmp = `${file}.${process.pid}.tmp`
+  await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  await fs.rename(tmp, file)
 }
 
 export function uid() {
